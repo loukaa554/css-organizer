@@ -165,6 +165,10 @@ export function sortCssText(cssText: string): string {
     "-ms-user-select",
   ];
 
+  // Configuration de l'indentation
+  const indentSize = 2; // Nombre d'espaces par niveau d'indentation
+  const indent = " ".repeat(indentSize);
+
   // Créer un map pour l'ordre des propriétés
   const orderMap = new Map<string, number>();
   propertyOrder.forEach((prop, index) => {
@@ -250,68 +254,222 @@ export function sortCssText(cssText: string): string {
     parts.push(currentPart.trim());
   }
 
+  // Type pour représenter une propriété CSS ou un commentaire
+  type CssItem = {
+    type: "property" | "comment";
+    property?: string;
+    value?: string;
+    comment?: string;
+    index: number;
+    originalIndex: number;
+  };
+
   // Fonction pour trier les propriétés d'un bloc CSS
-  const sortProperties = (cssBlock: string): string => {
+  const sortProperties = (cssBlock: string, nestingLevel = 0): string => {
     // Séparer le sélecteur du contenu
     const openBraceIndex = cssBlock.indexOf("{");
     if (openBraceIndex === -1) {
       return cssBlock;
     }
 
-    const selector = cssBlock.substring(0, openBraceIndex + 1);
+    // Extraire le sélecteur et s'assurer qu'il n'y a qu'une seule accolade ouvrante
+    let selector = cssBlock.substring(0, openBraceIndex).trim();
+
+    // Le contenu est tout ce qui se trouve entre la première accolade ouvrante et la dernière fermante
     const content = cssBlock.substring(
       openBraceIndex + 1,
       cssBlock.lastIndexOf("}")
     );
 
-    // Extraire les propriétés
-    const propertiesRegex = /([^;{}]+):([^;{}]+)(?:;|$)/g;
-    const properties: { property: string; value: string; index: number }[] = [];
+    // Analyser le contenu pour extraire les propriétés et les commentaires dans l'ordre original
+    const items: CssItem[] = [];
+    let originalIndex = 0;
 
-    // Extraire les commentaires et préserver leur position
-    const comments: { comment: string; index: number }[] = [];
+    // 1. Extraire les commentaires et préserver leur position
     let commentRegex = /\/\*[\s\S]*?\*\//g;
-    let match;
+    let commentMatch;
+    let contentWithCommentIndexes = content;
+    let indexShift = 0;
 
-    // Identifier les commentaires
-    while ((match = commentRegex.exec(content)) !== null) {
-      comments.push({ comment: match[0], index: match.index });
+    while ((commentMatch = commentRegex.exec(content)) !== null) {
+      const comment = commentMatch[0];
+      const startIndex = commentMatch.index;
+      const endIndex = startIndex + comment.length;
+
+      // Ajouter un marqueur pour le commentaire
+      const marker = `__COMMENT_${items.length}__`;
+      contentWithCommentIndexes =
+        contentWithCommentIndexes.substring(0, startIndex + indexShift) +
+        marker +
+        contentWithCommentIndexes.substring(endIndex + indexShift);
+
+      indexShift += marker.length - comment.length;
+
+      items.push({
+        type: "comment",
+        comment,
+        index: propertyOrder.length + 1, // Les commentaires ne sont pas triés
+        originalIndex: items.length,
+      });
     }
 
-    // Supprimer les commentaires pour l'analyse des propriétés
-    let contentWithoutComments = content.replace(/\/\*[\s\S]*?\*\//g, "");
+    // 2. Extraire les propriétés avec les marqueurs de commentaires
+    const propertyMatches = contentWithCommentIndexes
+      .split(";")
+      .filter((p) => p.trim() !== "");
 
-    // Extraire les propriétés
+    for (const propText of propertyMatches) {
+      // Vérifier si c'est un marqueur de commentaire
+      if (propText.trim().startsWith("__COMMENT_")) {
+        // C'est un marqueur que nous avons déjà traité, nous pouvons l'ignorer
+        continue;
+      }
+
+      const colonIndex = propText.indexOf(":");
+      if (colonIndex !== -1) {
+        // C'est une propriété
+        const property = propText.substring(0, colonIndex).trim();
+        const value = propText.substring(colonIndex + 1).trim();
+        const sortIndex = getPropertyIndex(property);
+
+        items.push({
+          type: "property",
+          property,
+          value,
+          index: sortIndex,
+          originalIndex: items.length,
+        });
+      }
+    }
+
+    // Analyser de nouveau le contenu pour obtenir l'ordre correct de tous les éléments
+    let contentAnalysis = content;
+    const itemsWithPositions: Array<CssItem & { position: number }> = [];
+
+    // Extraire les positions de tous les commentaires
+    while ((commentMatch = commentRegex.exec(content)) !== null) {
+      const comment = commentMatch[0];
+      const position = commentMatch.index;
+
+      // Trouver l'item correspondant à ce commentaire
+      const commentItem = items.find(
+        (item) => item.type === "comment" && item.comment === comment
+      );
+
+      if (commentItem) {
+        itemsWithPositions.push({ ...commentItem, position });
+      }
+    }
+
+    // Extraire les positions des propriétés
+    let propertyRegex = /([^;{}]+):([^;{}]+)(?:;|$)/g;
     let propMatch;
-    while (
-      (propMatch = propertiesRegex.exec(contentWithoutComments)) !== null
-    ) {
+
+    while ((propMatch = propertyRegex.exec(content)) !== null) {
+      const fullMatch = propMatch[0];
       const property = propMatch[1].trim();
       const value = propMatch[2].trim();
-      const index = getPropertyIndex(property);
-      properties.push({ property, value, index });
+      const position = propMatch.index;
+
+      // Trouver l'item correspondant à cette propriété
+      const propertyItem = items.find(
+        (item) =>
+          item.type === "property" &&
+          item.property === property &&
+          item.value === value
+      );
+
+      if (propertyItem) {
+        itemsWithPositions.push({ ...propertyItem, position });
+      }
     }
 
-    // Trier les propriétés selon l'ordre défini
-    properties.sort((a, b) => a.index - b.index);
+    // Trier les éléments par position pour obtenir l'ordre original
+    itemsWithPositions.sort((a, b) => a.position - b.position);
 
-    // Reconstruire le contenu avec les propriétés triées
-    let sortedContent = "";
-    for (const prop of properties) {
-      sortedContent += `${prop.property}: ${prop.value};\n`;
-    }
-
-    // Réinsérer les commentaires à leur position relative
-    comments.forEach((commentObj) => {
-      // On place simplement les commentaires au début pour simplifier
-      sortedContent = commentObj.comment + "\n" + sortedContent;
+    // Reconstruire l'ordre original des items
+    const originalItems = itemsWithPositions.map((item) => {
+      const { position, ...rest } = item;
+      return rest;
     });
 
-    return `${selector}\n${sortedContent}}`;
+    // Réorganiser les items en gardant les commentaires à leur place
+    // et en triant uniquement les propriétés
+    const sortedItems: CssItem[] = [];
+    let propertiesOnly: CssItem[] = [];
+
+    // Extraire toutes les propriétés
+    originalItems.forEach((item) => {
+      if (item.type === "property") {
+        propertiesOnly.push(item);
+      }
+    });
+
+    // Trier les propriétés selon l'ordre défini
+    propertiesOnly.sort((a, b) => a.index - b.index);
+
+    // Assigner un nouvel index séquentiel aux propriétés triées
+    propertiesOnly.forEach((prop, idx) => {
+      prop.originalIndex = idx;
+    });
+
+    // Combiner les propriétés triées avec les commentaires dans l'ordre original
+    originalItems.forEach((item) => {
+      if (item.type === "comment") {
+        sortedItems.push(item);
+      } else if (item.type === "property") {
+        // Pour chaque position de propriété, prendre la prochaine propriété triée
+        const nextProp = propertiesOnly.shift();
+        if (nextProp) {
+          sortedItems.push(nextProp);
+        }
+      }
+    });
+
+    // Calculer l'indentation pour ce niveau
+    const currentIndent = indent.repeat(nestingLevel);
+    const propertyIndent = indent.repeat(nestingLevel + 1);
+
+    // Reconstruire le contenu avec les items triés et indentés
+    let sortedContent = "";
+
+    // Ajouter les items dans l'ordre déterminé
+    for (const item of sortedItems) {
+      if (item.type === "comment") {
+        sortedContent += `${propertyIndent}${item.comment}\n`;
+      } else if (item.type === "property" && item.property && item.value) {
+        sortedContent += `${propertyIndent}${item.property}: ${item.value};\n`;
+      }
+    }
+
+    // Formater le sélecteur avec l'indentation appropriée
+    const formattedSelector = formatSelector(selector, currentIndent);
+    const closingBrace = `${currentIndent}}`;
+
+    return `${formattedSelector} {\n${sortedContent}${closingBrace}`;
+  };
+
+  // Formater le sélecteur avec l'indentation appropriée
+  const formatSelector = (selector: string, indentation: string): string => {
+    // Vérifier si c'est un sélecteur multi-lignes
+    if (selector.includes(",")) {
+      // Séparer les sélecteurs et supprimer les espaces avant/après
+      const selectors = selector.split(",").map((s) => s.trim());
+
+      // Rejoindre avec une virgule, un saut de ligne et l'indentation
+      return indentation + selectors.join(`,\n${indentation}`);
+    }
+
+    // Retourner le sélecteur simple avec l'indentation
+    return indentation + selector.trim();
   };
 
   // Fonction pour traiter les blocs spéciaux (media queries, keyframes)
-  const processSpecialBlock = (block: string): string => {
+  const processSpecialBlock = (block: string, nestingLevel = 0): string => {
+    // Calculer l'indentation pour ce niveau
+    const currentIndent = indent.repeat(nestingLevel);
+    const innerIndent = indent.repeat(nestingLevel + 1);
+
     // Vérifier si c'est un bloc spécial
     if (
       block.startsWith("@media") ||
@@ -324,7 +482,7 @@ export function sortCssText(cssText: string): string {
       const closeBraceIndex = block.lastIndexOf("}");
 
       if (openBraceIndex !== -1 && closeBraceIndex !== -1) {
-        const mediaQueryPart = block.substring(0, openBraceIndex + 1);
+        const mediaQueryPart = block.substring(0, openBraceIndex).trim();
         const contentPart = block.substring(
           openBraceIndex + 1,
           closeBraceIndex
@@ -354,13 +512,13 @@ export function sortCssText(cssText: string): string {
           }
         }
 
-        // Trier chaque bloc interne
+        // Trier chaque bloc interne avec un niveau d'indentation supplémentaire
         const sortedInnerBlocks = innerBlocks.map((block) =>
-          sortProperties(block)
+          sortProperties(block, nestingLevel + 1)
         );
 
-        // Reconstruire le bloc media query
-        return `${mediaQueryPart}\n${sortedInnerBlocks.join("\n\n")}\n}`;
+        // Reconstruire le bloc media query avec l'indentation appropriée
+        return `${currentIndent}${mediaQueryPart} {\n${sortedInnerBlocks.join("\n\n")}\n${currentIndent}}`;
       }
     } else if (block.startsWith("@keyframes")) {
       // Pour les keyframes, on préserve l'ordre mais on trie les propriétés à l'intérieur
@@ -368,7 +526,7 @@ export function sortCssText(cssText: string): string {
       const closeBraceIndex = block.lastIndexOf("}");
 
       if (openBraceIndex !== -1 && closeBraceIndex !== -1) {
-        const keyframesPart = block.substring(0, openBraceIndex + 1);
+        const keyframesPart = block.substring(0, openBraceIndex).trim();
         const contentPart = block.substring(
           openBraceIndex + 1,
           closeBraceIndex
@@ -398,22 +556,22 @@ export function sortCssText(cssText: string): string {
           }
         }
 
-        // Trier chaque bloc interne
+        // Trier chaque bloc interne avec un niveau d'indentation supplémentaire
         const sortedInnerBlocks = innerBlocks.map((block) =>
-          sortProperties(block)
+          sortProperties(block, nestingLevel + 1)
         );
 
-        // Reconstruire le bloc keyframes
-        return `${keyframesPart}\n${sortedInnerBlocks.join("\n\n")}\n}`;
+        // Reconstruire le bloc keyframes avec l'indentation appropriée
+        return `${currentIndent}${keyframesPart} {\n${sortedInnerBlocks.join("\n\n")}\n${currentIndent}}`;
       }
     }
 
     // Si ce n'est pas un bloc spécial ou si le traitement a échoué, essayer de trier comme un bloc normal
-    return sortProperties(block);
+    return sortProperties(block, nestingLevel);
   };
 
-  // Traiter chaque partie
-  const processedParts = parts.map((part) => processSpecialBlock(part));
+  // Traiter chaque partie avec un niveau d'indentation de 0 (premier niveau)
+  const processedParts = parts.map((part) => processSpecialBlock(part, 0));
 
   // Reconstruire le CSS
   return processedParts.join("\n\n");

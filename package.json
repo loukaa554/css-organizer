@@ -3,7 +3,7 @@
   "displayName": "CSS Organizer by Loukaaa",
   "description": "Organizer your css",
   "icon": "logo.png",
-  "version": "0.0.4",
+  "version": "0.0.6",
   "engines": {
     "vscode": "^1.98.0"
   },
